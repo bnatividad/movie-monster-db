@@ -3,7 +3,8 @@
 //   refresh  - pull trending lists (global + PH), check releases for tracked titles
 //   summary  - send the weekly summary of new releases to Discord and/or Telegram
 //   preview  - build the summary and return it; sends nothing, marks nothing sent
-//   preview_send - same, but also posts it (labelled as a preview) to the alert channels; marks nothing sent
+//   preview_send - same, but also posts it (labelled as a preview) to DISCORD_TEST_WEBHOOK_URL if set,
+//                  otherwise to the normal alert channels; marks nothing sent
 //   test     - send a test message to every configured channel (Telegram: send /start to the bot first)
 // Every call must carry header  x-cron-secret: <settings.cron_secret>
 import { createClient } from "npm:@supabase/supabase-js@2.45.4";
@@ -305,9 +306,7 @@ async function latestList(list: string) {
 }
 
 // ---------- Discord ----------
-async function discordSend(markdown: string) {
-  const url = Deno.env.get("DISCORD_WEBHOOK_URL");
-  if (!url) throw new Error("DISCORD_WEBHOOK_URL secret is not set");
+async function discordSend(markdown: string, url: string) {
   // Discord messages max out at 2000 chars: split on line boundaries
   const chunks: string[] = [];
   let cur = "";
@@ -325,8 +324,14 @@ async function discordSend(markdown: string) {
   }
 }
 
-// Send to every configured channel; succeed if at least one worked
-async function broadcast(html: string, markdown: string) {
+// Send to every configured channel; succeed if at least one worked.
+// testing=true sends only to DISCORD_TEST_WEBHOOK_URL when that secret is set (else falls back to the normal channels).
+async function broadcast(html: string, markdown: string, testing = false) {
+  const testUrl = Deno.env.get("DISCORD_TEST_WEBHOOK_URL");
+  if (testing && testUrl) {
+    await discordSend(markdown, testUrl);
+    return { sent: ["discord_test"], errors: [] as string[] };
+  }
   const sent: string[] = [], errors: string[] = [];
   if (Deno.env.get("TELEGRAM_BOT_TOKEN")) {
     try {
@@ -336,8 +341,9 @@ async function broadcast(html: string, markdown: string) {
       sent.push("telegram");
     } catch (e) { errors.push(String(e)); }
   }
-  if (Deno.env.get("DISCORD_WEBHOOK_URL")) {
-    try { await discordSend(markdown); sent.push("discord"); } catch (e) { errors.push(String(e)); }
+  const discordUrl = Deno.env.get("DISCORD_WEBHOOK_URL");
+  if (discordUrl) {
+    try { await discordSend(markdown, discordUrl); sent.push("discord"); } catch (e) { errors.push(String(e)); }
   }
   if (!sent.length) throw new Error(errors.length ? errors.join("; ") : "No alert channel set: add DISCORD_WEBHOOK_URL and/or TELEGRAM_BOT_TOKEN");
   return { sent, errors };
@@ -377,8 +383,9 @@ async function whereToWatch(tmdbId: number, mediaType: string): Promise<Where> {
 
 const whereText = (w: Where) => {
   const parts: string[] = [];
-  if (w.stream.length) parts.push(`Stream: ${w.stream.join(", ")}`);
-  if (w.rentBuy.length) parts.push(`Rent/Buy: ${w.rentBuy.join(", ")}`);
+  // Streaming (subscription/free/ads) is the default and needs no label; only rent/buy is tagged
+  if (w.stream.length) parts.push(w.stream.join(", "));
+  if (w.rentBuy.length) parts.push(`${w.rentBuy.join(", ")} (rent/buy)`);
   if (!parts.length && w.networks.length) parts.push(`Airs on ${w.networks.join(", ")} · not on PH platforms`);
   // Cinema date only while it's relevant: upcoming, or opened in the last 30 days
   if (!w.stream.length && w.phCinema) {
@@ -428,11 +435,11 @@ async function buildSummary() {
     try { where.set(k, await whereToWatch(id, type)); } catch { /* leave blank on lookup failure */ }
   }));
 
-  // Where-to-watch suffix for an entry's line (" · Stream: Netflix"); empty when there's nothing to show
-  const whereSuffix = (key: string) => {
+  // Where-to-watch subtitle under an entry (Discord "-# " subtext line); skipped when there's nothing to show
+  const pushWhere = (key: string) => {
     const w = where.get(key);
     const s = w ? whereText(w) : "";
-    return s ? ` · ${clean(s)}` : "";
+    if (s) lines.push(`-# ${clean(s)}`);
   };
 
   // One entry per title per day: same-day releases are merged, e.g. "(digital, Blu-ray)"
@@ -461,7 +468,8 @@ async function buildSummary() {
       const eps = u.tags.filter((x) => /^S\d+E\d+$/.test(x));
       const other = u.tags.filter((x) => !eps.includes(x));
       const tag = [...eps, other.length ? `(${other.join(", ")})` : ""].filter(Boolean).join(" ");
-      lines.push(`- ${fmtDate(u.date, showYear)} · **${clean(u.title)}** _${tag}_${whereSuffix(u.key)}`);
+      lines.push(`- ${fmtDate(u.date, showYear)} · **${clean(u.title)}** _${tag}_`);
+      pushWhere(u.key);
     }
   }
 
@@ -471,7 +479,8 @@ async function buildSummary() {
     lines.push("", `**${label}**`);
     for (const r of rows) {
       const year = r.titles.first_air_or_release?.slice(0, 4);
-      lines.push(`${r.rank}. **${clean(r.titles.title)}**${year ? ` _(${year})_` : ""}${r.titles.media_type === "tv" ? " (TV)" : ""}${whereSuffix(`${r.titles.media_type}:${r.titles.tmdb_id}`)}`);
+      lines.push(`${r.rank}. **${clean(r.titles.title)}**${year ? ` _(${year})_` : ""}${r.titles.media_type === "tv" ? " (TV)" : ""}`);
+      pushWhere(`${r.titles.media_type}:${r.titles.tmdb_id}`);
     }
   }
   return { lines, evs };
@@ -492,7 +501,7 @@ async function preview(send = false) {
   const { lines, evs } = await buildSummary();
   if (!send) return { new_events: evs.length, markdown: lines.join("\n") };
   const out = ["-# Layout preview, not the weekly summary. No releases were marked as sent.", ...lines];
-  return { ...(await broadcast(toHtml(out), out.join("\n"))), new_events: evs.length };
+  return { ...(await broadcast(toHtml(out), out.join("\n"), true)), new_events: evs.length };
 }
 
 // Strip markup characters from titles so they can't break bold/italics on either platform
