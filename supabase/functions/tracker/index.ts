@@ -1,7 +1,9 @@
 // Release tracker edge function.
 // Actions (POST body {"action": ...} or ?action=...):
 //   refresh  - pull trending lists (global + PH), check releases for tracked titles
-//   summary  - send the daily summary of new releases to Discord and/or Telegram
+//   summary  - send the weekly summary of new releases to Discord and/or Telegram
+//   preview  - build the summary and return it; sends nothing, marks nothing sent
+//   preview_send - same, but also posts it (labelled as a preview) to the alert channels; marks nothing sent
 //   test     - send a test message to every configured channel (Telegram: send /start to the bot first)
 // Every call must carry header  x-cron-secret: <settings.cron_secret>
 import { createClient } from "npm:@supabase/supabase-js@2.45.4";
@@ -17,6 +19,12 @@ const NETFLIX_TSV = "https://www.netflix.com/tudum/top10/data/all-weeks-countrie
 const LIST_SIZE = 10;
 const TRACK_DAYS = 14; // keep tracking a title this many days after it leaves the charts
 const today = () => new Date().toISOString().slice(0, 10);
+// "2026-11-11" -> "11 Nov 2026" (display only; keep ISO for comparisons/sorting)
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const fmtDate = (iso: string, withYear = true) => {
+  const [y, m, d] = iso.slice(0, 10).split("-");
+  return `${d} ${MONTHS[Number(m) - 1]}${withYear ? ` ${y}` : ""}`;
+};
 
 // ---------- TMDB ----------
 async function tmdb(path: string, params: Record<string, string> = {}) {
@@ -291,7 +299,7 @@ async function latestList(list: string) {
   const { data: last } = await db.from("trending").select("captured_at").eq("list", list)
     .order("captured_at", { ascending: false }).limit(1).maybeSingle();
   if (!last) return [];
-  const { data } = await db.from("trending").select("rank, source, titles(title, media_type)")
+  const { data } = await db.from("trending").select("rank, source, titles(tmdb_id, title, media_type, first_air_or_release)")
     .eq("list", list).eq("captured_at", last.captured_at).order("rank");
   return data ?? [];
 }
@@ -335,15 +343,58 @@ async function broadcast(html: string, markdown: string) {
   return { sent, errors };
 }
 
-// Lines use a tiny markup: **bold**. Rendered to HTML (Telegram) or kept as Markdown (Discord).
-const toHtml = (lines: string[]) => lines.map((l) => esc(l).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")).join("\n");
+// Lines use a tiny markup: **bold**, _italic_, "- " list items, "  - " sub-items and "-# " subtext lines.
+// Kept as Markdown for Discord; rendered to HTML for Telegram (no lists or subtext there, so bullets
+// become • and –, and subtext becomes an indented italic line).
+// Safe because clean() strips * and _ from all dynamic text.
+const toHtml = (lines: string[]) => lines.map((l) => esc(l)
+  .replace(/^-# (.*)$/, "    <i>$1</i>")
+  .replace(/^  - /, "   – ")
+  .replace(/^- /, "• ")
+  .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
+  .replace(/_(.+?)_/g, "<i>$1</i>")).join("\n");
 
-async function summary() {
+// ---------- Where to watch ----------
+type Where = { stream: string[]; rentBuy: string[]; networks: string[]; phCinema: string | null };
+
+// Live TMDB lookup: PH platforms split into stream vs rent/buy, original TV network, earliest PH cinema date
+async function whereToWatch(tmdbId: number, mediaType: string): Promise<Where> {
+  const m = await tmdb(`/${mediaType}/${tmdbId}`, { append_to_response: mediaType === "movie" ? "release_dates,watch/providers" : "watch/providers" });
+  const ph = m["watch/providers"]?.results?.PH ?? {};
+  const names = (keys: string[]) => [...new Set(keys.flatMap((k) => (ph[k] ?? []).map((p: any) => p.provider_name as string)))];
+  const stream = names(["flatrate", "free", "ads"]);
+  const rentBuy = names(["rent", "buy"]).filter((n) => !stream.includes(n));
+  let phCinema: string | null = null;
+  for (const c of m.release_dates?.results ?? []) {
+    if (c.iso_3166_1 !== "PH") continue;
+    for (const d of c.release_dates ?? []) {
+      const date = (d.release_date ?? "").slice(0, 10);
+      if ((d.type === 2 || d.type === 3) && date && (!phCinema || date < phCinema)) phCinema = date; // 2 = limited, 3 = theatrical
+    }
+  }
+  return { stream, rentBuy, networks: (m.networks ?? []).map((n: any) => n.name as string), phCinema };
+}
+
+const whereText = (w: Where) => {
+  const parts: string[] = [];
+  if (w.stream.length) parts.push(`Stream: ${w.stream.join(", ")}`);
+  if (w.rentBuy.length) parts.push(`Rent/Buy: ${w.rentBuy.join(", ")}`);
+  if (!parts.length && w.networks.length) parts.push(`Airs on ${w.networks.join(", ")} · not on PH platforms`);
+  // Cinema date only while it's relevant: upcoming, or opened in the last 30 days
+  if (!w.stream.length && w.phCinema) {
+    const monthAgo = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
+    if (w.phCinema > today()) parts.push(`PH cinemas from ${fmtDate(w.phCinema)}`);
+    else if (w.phCinema >= monthAgo) parts.push(`In PH cinemas since ${fmtDate(w.phCinema)}`);
+  }
+  return parts.join(" · ");
+};
+
+async function buildSummary() {
   const { data: events } = await db.from("release_events")
     .select("id, kind, event_key, event_date, detail, titles(title, media_type)")
     .is("notified_at", null).order("event_date", { ascending: false });
 
-  const lines: string[] = [`**🎬 Daily release summary — ${today()}**`, ""];
+  const lines: string[] = [`**🎬 Weekly Release Summary — ${fmtDate(today())}**`, ""];
   const evs = events ?? [];
   if (evs.length) {
     lines.push(`**New releases (${evs.length})**`);
@@ -351,13 +402,13 @@ async function summary() {
     for (const e of evs as any[]) {
       const k = `${e.titles.title} (${e.titles.media_type === "tv" ? "TV" : "Movie"})`;
       if (!byTitle.has(k)) byTitle.set(k, []);
-      byTitle.get(k)!.push(`${e.detail}${e.event_date && e.kind !== "streaming" ? ` · ${e.event_date}` : ""}`);
+      byTitle.get(k)!.push(`${e.detail}${e.event_date && e.kind !== "streaming" ? ` · ${fmtDate(e.event_date)}` : ""}`);
     }
     for (const [t, ds] of byTitle) {
-      lines.push(`• **${clean(t)}**`);
+      lines.push(`- **${clean(t)}**`);
       const shown = ds.slice(0, 6);
-      for (const d of shown) lines.push(`   – ${clean(d)}`);
-      if (ds.length > shown.length) lines.push(`   – …and ${ds.length - shown.length} more`);
+      for (const d of shown) lines.push(`  - ${clean(d)}`);
+      if (ds.length > shown.length) lines.push(`  - …and ${ds.length - shown.length} more`);
     }
   } else {
     lines.push("No new releases since the last summary.");
@@ -365,26 +416,69 @@ async function summary() {
 
   // Coming up in the next 7 days
   const week = new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10);
-  const { data: tracked } = await db.from("titles").select("title, media_type, digital_release, physical_release, next_episode").eq("tracked", true);
-  const upcoming: string[] = [];
+  const { data: tracked } = await db.from("titles").select("tmdb_id, title, media_type, digital_release, physical_release, next_episode").eq("tracked", true);
+  const lists = await Promise.all(["global", "ph"].map(latestList)) as any[][];
+
+  // Where to watch: one live TMDB lookup per title shown (tracked + both charts), deduped
+  const where = new Map<string, Where>();
+  const keys = new Map<string, [number, string]>();
+  for (const t of tracked ?? []) keys.set(`${t.media_type}:${t.tmdb_id}`, [t.tmdb_id, t.media_type]);
+  for (const r of lists.flat()) keys.set(`${r.titles.media_type}:${r.titles.tmdb_id}`, [r.titles.tmdb_id, r.titles.media_type]);
+  await Promise.all([...keys].map(async ([k, [id, type]]) => {
+    try { where.set(k, await whereToWatch(id, type)); } catch { /* leave blank on lookup failure */ }
+  }));
+
+  // Where-to-watch suffix for an entry's line (" · Stream: Netflix"); empty when there's nothing to show
+  const whereSuffix = (key: string) => {
+    const w = where.get(key);
+    const s = w ? whereText(w) : "";
+    return s ? ` · ${clean(s)}` : "";
+  };
+
+  // One entry per title per day: same-day releases are merged, e.g. "(digital, Blu-ray)"
+  const upcoming = new Map<string, { date: string; title: string; key: string; tags: string[] }>();
+  const addUpcoming = (date: string, t: any, tag: string) => {
+    const key = `${t.media_type}:${t.tmdb_id}`;
+    const u = upcoming.get(`${date}|${key}`) ?? { date, title: t.title, key, tags: [] };
+    u.tags.push(tag);
+    upcoming.set(`${date}|${key}`, u);
+  };
   for (const t of tracked ?? []) {
     const ne = t.next_episode as any;
-    if (ne?.air_date && ne.air_date <= week) upcoming.push(`${ne.air_date} · ${t.title} S${pad(ne.season)}E${pad(ne.episode)}`);
-    if (t.digital_release && t.digital_release > today() && t.digital_release <= week) upcoming.push(`${t.digital_release} · ${t.title} (digital)`);
-    if (t.physical_release && t.physical_release > today() && t.physical_release <= week) upcoming.push(`${t.physical_release} · ${t.title} (Blu-ray)`);
+    const cinema = where.get(`${t.media_type}:${t.tmdb_id}`)?.phCinema;
+    if (ne?.air_date && ne.air_date <= week) addUpcoming(ne.air_date, t, `S${pad(ne.season)}E${pad(ne.episode)}`);
+    if (t.digital_release && t.digital_release > today() && t.digital_release <= week) addUpcoming(t.digital_release, t, "digital");
+    if (t.physical_release && t.physical_release > today() && t.physical_release <= week) addUpcoming(t.physical_release, t, "Blu-ray");
+    if (cinema && cinema > today() && cinema <= week) addUpcoming(cinema, t, "PH cinemas");
   }
-  if (upcoming.length) {
-    lines.push("", "**Coming in the next 7 days**");
-    for (const u of upcoming.sort()) lines.push(`• ${clean(u)}`);
+  if (upcoming.size) {
+    lines.push("", "**Coming this week**");
+    // ISO dates kept until display so sorting stays chronological
+    const entries = [...upcoming.values()].sort((a, b) => a.date.localeCompare(b.date) || a.title.localeCompare(b.title));
+    // Drop the year when every entry falls in the same year
+    const showYear = new Set(entries.map((u) => u.date.slice(0, 4))).size > 1;
+    for (const u of entries) {
+      const eps = u.tags.filter((x) => /^S\d+E\d+$/.test(x));
+      const other = u.tags.filter((x) => !eps.includes(x));
+      const tag = [...eps, other.length ? `(${other.join(", ")})` : ""].filter(Boolean).join(" ");
+      lines.push(`- ${fmtDate(u.date, showYear)} · **${clean(u.title)}** _${tag}_${whereSuffix(u.key)}`);
+    }
   }
 
-  for (const [list, label] of [["global", "🌍 Global trending"], ["ph", "🇵🇭 Trending in PH"]]) {
-    const rows: any[] = await latestList(list);
+  for (const [i, label] of ["🌍 Trending Globally", "🇵🇭 Trending in PH"].entries()) {
+    const rows = lists[i];
     if (!rows.length) continue;
     lines.push("", `**${label}**`);
-    for (const r of rows) lines.push(`${r.rank}. ${clean(r.titles.title)}${r.titles.media_type === "tv" ? " (TV)" : ""}`);
+    for (const r of rows) {
+      const year = r.titles.first_air_or_release?.slice(0, 4);
+      lines.push(`${r.rank}. **${clean(r.titles.title)}**${year ? ` _(${year})_` : ""}${r.titles.media_type === "tv" ? " (TV)" : ""}${whereSuffix(`${r.titles.media_type}:${r.titles.tmdb_id}`)}`);
+    }
   }
+  return { lines, evs };
+}
 
+async function summary() {
+  const { lines, evs } = await buildSummary();
   const result = await broadcast(toHtml(lines), lines.join("\n"));
   if (evs.length) {
     await db.from("release_events").update({ notified_at: new Date().toISOString() }).in("id", evs.map((e: any) => e.id));
@@ -392,13 +486,22 @@ async function summary() {
   return { ...result, new_events: evs.length };
 }
 
+// Dry run: build the summary and return it. Sends nothing, marks nothing notified.
+// With send=true it also posts the preview (labelled as such) to the alert channels, still marking nothing.
+async function preview(send = false) {
+  const { lines, evs } = await buildSummary();
+  if (!send) return { new_events: evs.length, markdown: lines.join("\n") };
+  const out = ["-# Layout preview, not the weekly summary. No releases were marked as sent.", ...lines];
+  return { ...(await broadcast(toHtml(out), out.join("\n"))), new_events: evs.length };
+}
+
 // Strip markup characters from titles so they can't break bold/italics on either platform
 const clean = (s: string) => s.replace(/[*_~`|]/g, "");
 
 async function testAlerts() {
   return await broadcast(
-    "✅ <b>Release tracker connected.</b> You'll get a daily summary here.",
-    "✅ **Release tracker connected.** You'll get a daily summary here.",
+    "✅ <b>Release tracker connected.</b> You'll get a weekly summary here.",
+    "✅ **Release tracker connected.** You'll get a weekly summary here.",
   );
 }
 
@@ -416,6 +519,8 @@ Deno.serve(async (req) => {
     let info: any;
     if (action === "refresh") info = await refresh();
     else if (action === "summary") info = await summary();
+    else if (action === "preview") info = await preview();
+    else if (action === "preview_send") info = await preview(true);
     else if (action === "test" || action === "telegram") info = await testAlerts();
     else return new Response(JSON.stringify({ error: "unknown action" }), { status: 400 });
     info.ms = Date.now() - started;
