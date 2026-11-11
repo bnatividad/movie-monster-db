@@ -48,7 +48,7 @@ Actions (POST `{"action": ...}`):
 - `refresh`: save both trending lists, mark tracked titles, check releases, insert new events. First check of a title records old releases silently (only the last 3 days get alerted).
 - `summary`: post the weekly summary (new releases since the last summary, coming this week, both charts, with where-to-watch details from live TMDB lookups) to Discord and/or Telegram, then mark events notified.
 - `preview`: build the same message as `summary` and return it as `markdown`. Sends nothing and marks nothing notified. Run `select public.call_tracker('preview');` and read the result from `net._http_response` by the returned id.
-- `preview_send`: same as `preview`, but also posts it to the alert channels with a "layout preview" note at the top. Still marks nothing notified.
+- `preview_send`: same as `preview`, but also posts it with a "layout preview" note at the top. Goes only to `DISCORD_TEST_WEBHOOK_URL` when that secret is set, otherwise to the normal alert channels. Still marks nothing notified.
 - `test`: send a test message to all configured channels.
 
 Source: `supabase/functions/tracker/index.ts`
@@ -60,12 +60,13 @@ Source: `supabase/functions/tracker/index.ts`
 
 ### Secrets (Supabase → Edge Functions → Secrets; never commit values)
 - `TMDB_TOKEN`: TMDB API Read Access Token (set)
-- `DISCORD_WEBHOOK_URL`: Discord channel webhook (set)
+- `DISCORD_WEBHOOK_URL`: Discord channel webhook for the real summary (set)
+- `DISCORD_TEST_WEBHOOK_URL`: optional Discord webhook for a test channel. Used only by `preview_send`
 - `TELEGRAM_BOT_TOKEN`: optional, not set yet (then send `/start` to the bot)
 
 ## Status (as of 2026-11-11)
 - ✅ Refresh runs hourly with no failures since keys were added (~20–31 titles tracked).
-- ✅ Discord test message and daily summaries delivered. Switched to weekly on 2026-11-11; where-to-watch details added (function v10).
+- ✅ Discord test message and daily summaries delivered. Switched to weekly on 2026-11-11; where-to-watch details added (function v13).
 - Migrations in `supabase/migrations/` match what was applied. Message layout is specified in `TEMPLATE.md` (example in `TEMPLATE_SAMPLE.md`).
 
 ## Known issues / ideas
