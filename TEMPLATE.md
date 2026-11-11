@@ -2,9 +2,9 @@
 
 The layout of the messages the `tracker` edge function posts to Discord. It matches what [`summary()` and `testAlerts()` in index.ts](supabase/functions/tracker/index.ts) send today. Edit this file to design changes, then update the code and [TEMPLATE_SAMPLE.md](TEMPLATE_SAMPLE.md) (example output) to match.
 
-`{placeholders}` are filled in by the function. Everything else is literal text. Discord renders `**bold**`, `_italic_`, `- ` bullet lists (with `  - ` sub-items) and `1.` numbered lists. Movie and show titles are always **bold**.
+`{placeholders}` are filled in by the function. Everything else is literal text. Discord renders `**bold**`, `_italic_`, `- ` bullet lists (with `  - ` sub-items), `1.` numbered lists and `-# ` subtext (a small grey line, used as a subtitle). Movie and show titles are always **bold**.
 
-The `preview` action builds this same message without sending it, and `preview_send` posts it with a "layout preview" note. Neither marks releases as sent.
+The `preview` action builds this same message without sending it, and `preview_send` posts it with a "layout preview" note (to the test channel when `DISCORD_TEST_WEBHOOK_URL` is set). Neither marks releases as sent.
 
 ## Weekly summary
 
@@ -20,26 +20,30 @@ Sent by the `summary` action, every Sunday at 9:00 AM PH time. Covers everything
   - …and {more_count} more
 
 **Coming this week**
-- {date} · **{title}** _S{season}E{episode}_ · {where}
-- {date} · **{title}** _({release_types})_ · {where}
+- {date} · **{title}** _S{season}E{episode}_
+-# {where}
+- {date} · **{title}** _({release_types})_
+-# {where}
 
 **🌍 Trending Globally**
-{rank}. **{title}** _({year})_{ (TV)} · {where}
+{rank}. **{title}** _({year})_{ (TV)}
+-# {where}
 
 **🇵🇭 Trending in PH**
-{rank}. **{title}** _({year})_{ (TV)} · {where}
+{rank}. **{title}** _({year})_{ (TV)}
+-# {where}
 ```
 
 `{release_types}` lists every release for that title on that date in one entry: `digital`, `Blu-ray`, `PH cinemas`, e.g. `(digital, Blu-ray)`.
 
 ### Where to watch (`{where}`)
 
-Shown at the end of the entry's line in normal text. Parts are joined with ` · `. When no part applies, the line ends after the title (no trailing ` · `).
+Shown as a subtitle line (`-# `) under the entry. Parts are joined with ` · `. The subtitle line is left out when no part applies.
 
 | Part | Shown when | Example |
 |---|---|---|
-| `Stream: {platforms}` | Available in PH by subscription, free or with ads | `Stream: Netflix, Amazon Prime Video` |
-| `Rent/Buy: {platforms}` | Available in PH to rent or buy (platforms already listed under Stream are left out) | `Rent/Buy: Apple TV Store` |
+| `{platforms}` | Available in PH by subscription, free or with ads. No label: streaming is the default | `Netflix, Amazon Prime Video` |
+| `{platforms} (rent/buy)` | Available in PH to rent or buy (platforms already listed as streaming are left out) | `Apple TV Store (rent/buy)` |
 | `Airs on {network} · not on PH platforms` | Shows with no PH platform: the network it airs on | `Airs on Disney+ · not on PH platforms` |
 | `PH cinemas from {date}` | Movies with no PH streaming and an upcoming PH cinema date | `PH cinemas from 16 Dec 2026` |
 | `In PH cinemas since {date}` | Movies with no PH streaming that opened in PH cinemas in the last 30 days (older cinema dates are left out) | `In PH cinemas since 04 Nov 2026` |
@@ -82,4 +86,4 @@ Sent by the `test` action.
 - Posted through the webhook as **Release Tracker**, with link previews (embeds) turned off and @mentions blocked.
 - Messages over about 1,900 characters are split at line breaks into several posts, because Discord's limit is 2,000.
 - The characters `` * _ ~ ` | `` are removed from titles and detail lines so they can't break the formatting.
-- Telegram gets the same content, converted to HTML and cut off at about 4,000 characters. Telegram has no lists, so `- ` becomes `•` and `  - ` becomes `–`.
+- Telegram gets the same content, converted to HTML and cut off at about 4,000 characters. Telegram has no lists or subtext, so `- ` becomes `•`, `  - ` becomes `–`, and `-# ` lines become indented italic lines.
