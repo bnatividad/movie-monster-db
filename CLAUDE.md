@@ -20,7 +20,7 @@ Handoff from the first planning/build session (2026-11-10 → 11). Read this fir
 | Tracked set | ~10–20 titles (currently = whatever is on the two charts, kept for 14 days after leaving) |
 | User picks | Later: users can search and add their own titles |
 | User accounts | Skipped for now |
-| Alerts | **Owner only** for now; **daily summary** is enough |
+| Alerts | **Owner only** for now; **weekly summary** (Sundays) |
 | Alert channels | **Discord (live)**; Telegram supported in code but not set up yet |
 | Check frequency | Hourly is fine |
 
@@ -46,14 +46,16 @@ Handoff from the first planning/build session (2026-11-10 → 11). Read this fir
 ### Edge function `tracker` (verify_jwt = false; auth via `x-cron-secret` header = `settings.cron_secret`)
 Actions (POST `{"action": ...}`):
 - `refresh`: save both trending lists, mark tracked titles, check releases, insert new events. First check of a title records old releases silently (only the last 3 days get alerted).
-- `summary`: post the daily summary (new releases, next 7 days, both charts) to Discord and/or Telegram, then mark events notified.
+- `summary`: post the weekly summary (new releases since the last summary, coming this week, both charts, with where-to-watch details from live TMDB lookups) to Discord and/or Telegram, then mark events notified.
+- `preview`: build the same message as `summary` and return it as `markdown`. Sends nothing and marks nothing notified. Run `select public.call_tracker('preview');` and read the result from `net._http_response` by the returned id.
+- `preview_send`: same as `preview`, but also posts it to the alert channels with a "layout preview" note at the top. Still marks nothing notified.
 - `test`: send a test message to all configured channels.
 
 Source: `supabase/functions/tracker/index.ts`
 
 ### Schedule (pg_cron + pg_net, via `public.call_tracker(action)`)
 - `tracker-refresh`: `7 * * * *` (hourly)
-- `tracker-daily-summary`: `13 0 * * *` (8:13 AM PH time)
+- `tracker-weekly-summary`: `0 1 * * 0` (Sundays 9:00 AM PH time; was daily at 8:13 AM until 2026-11-11)
 - Manual run from SQL: `select public.call_tracker('refresh');`, then check `select * from run_log order by ran_at desc limit 5;`
 
 ### Secrets (Supabase → Edge Functions → Secrets; never commit values)
@@ -63,8 +65,8 @@ Source: `supabase/functions/tracker/index.ts`
 
 ## Status (as of 2026-11-11)
 - ✅ Refresh runs hourly with no failures since keys were added (~20–31 titles tracked).
-- ✅ Discord test message and daily summaries delivered.
-- Migrations in `supabase/migrations/` match what was applied.
+- ✅ Discord test message and daily summaries delivered. Switched to weekly on 2026-11-11; where-to-watch details added (function v10).
+- Migrations in `supabase/migrations/` match what was applied. Message layout is specified in `TEMPLATE.md` (example in `TEMPLATE_SAMPLE.md`).
 
 ## Known issues / ideas
 - Tracked set grows to ~30 because the 14-day window accumulates chart churn. The target was 10–20, so consider shortening the window or capping it.
