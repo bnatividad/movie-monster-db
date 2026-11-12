@@ -46,7 +46,7 @@ Handoff from the first planning/build session (2026-11-10 → 11). Read this fir
 ### Edge function `tracker` (verify_jwt = false; auth via `x-cron-secret` header = `settings.cron_secret`)
 Actions (POST `{"action": ...}`):
 - `refresh`: save both trending lists, mark tracked titles, check releases, insert new events. First check of a title records old releases silently (only the last 3 days get alerted).
-- `summary`: post the weekly summary (new releases since the last summary, coming this week, both charts, with where-to-watch details from live TMDB lookups) to Discord and/or Telegram, then mark events notified.
+- `summary`: post the weekly summary (recently released (last 7 days), coming this week, both charts, with where-to-watch details from live TMDB lookups) to Discord and/or Telegram, then mark events notified.
 - `preview`: build the same message as `summary` and return it as `markdown`. Sends nothing and marks nothing notified. Run `select public.call_tracker('preview');` and read the result from `net._http_response` by the returned id.
 - `preview_send`: same as `preview`, but also posts it with a "layout preview" note at the top. Goes only to `DISCORD_TEST_WEBHOOK_URL` when that secret is set, otherwise to the normal alert channels. Still marks nothing notified.
 - `test`: send a test message to all configured channels.
@@ -66,7 +66,7 @@ Source: `supabase/functions/tracker/index.ts`
 
 ## Status (as of 2026-11-11)
 - ✅ Refresh runs hourly with no failures since keys were added (~20–31 titles tracked).
-- ✅ Discord test message and daily summaries delivered. Switched to weekly on 2026-11-11; where-to-watch details added (function v13).
+- ✅ Discord test message and daily summaries delivered. Switched to weekly on 2026-11-11; where-to-watch details added (function v13); "Recently released" section and date-grouped "Coming this week" added 2026-11-12 (v16).
 - Migrations in `supabase/migrations/` match what was applied. Message layout is specified in `TEMPLATE.md` (example in `TEMPLATE_SAMPLE.md`).
 
 ## Known issues / ideas

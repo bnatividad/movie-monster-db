@@ -8,21 +8,25 @@ The `preview` action builds this same message without sending it, and `preview_s
 
 ## Weekly summary
 
-Sent by the `summary` action, every Sunday at 9:00 AM PH time. Covers everything since the previous summary.
+Sent by the `summary` action, every Sunday at 9:00 AM PH time.
 
 ```
 **🎬 Weekly Release Summary — {date}**
 
-**New releases ({event_count})**
-- **{title} ({TV|Movie})**
-  - {event_detail} · {event_date}
-  - {event_detail} · {event_date}
-  - …and {more_count} more
+**Recently released**
+- **{title}** _S{season}E{episode}–E{episode}_
+-# {where}
+- **{title}** _({release_types})_
+-# {where}
 
 **Coming this week**
-- {date} · **{title}** _S{season}E{episode}_
+**{weekday} {date}**
+- **{title}** _S{season}E{episode}_
 -# {where}
-- {date} · **{title}** _({release_types})_
+- **{title}** _({release_types})_
+-# {where}
+**{weekday} {date}**
+- **{title}** _S{season}E{episode}_
 -# {where}
 
 **🌍 Trending Globally**
@@ -34,7 +38,10 @@ Sent by the `summary` action, every Sunday at 9:00 AM PH time. Covers everything
 -# {where}
 ```
 
-`{release_types}` lists every release for that title on that date in one entry: `digital`, `Blu-ray`, `PH cinemas`, e.g. `(digital, Blu-ray)`.
+- **Recently released** has no dates: one entry per title for the whole week, with consecutive episodes collapsed into a range (`S25E32–E35`).
+- **Coming this week** is grouped under a bold date line (`**Fri 13 Nov**`), one entry per title per date.
+- In both, episodes come first and consecutive episodes are collapsed into a range, for example `S03E01–E04`.
+- `{release_types}` lists the title's other releases on that date: `digital`, `Blu-ray`, `PH cinemas`, `Season {n}`, or `new on {platform}` (Recently released only), e.g. `(digital, Blu-ray)`. `Season {n}` is left out when that day's episodes are listed.
 
 ### Where to watch (`{where}`)
 
@@ -55,23 +62,14 @@ PH platforms come from TMDB (JustWatch data). They show where a title is availab
 | Section | Shown when | Notes |
 |---|---|---|
 | Header | Always | `{date}` is today in UTC |
-| New releases | There are events not yet notified | If there are none, this line shows instead: `No new releases since the last summary.` Grouped by title, newest event first, at most 6 lines per title, then `…and N more` |
-| Coming this week | Something is due within 7 days | Sorted by date. Covers the next episode of each tracked show and upcoming digital, Blu-ray or PH cinema dates for movies, one entry per title per date. The year is left out of `{date}` (`10 Nov`) when every entry is in the same year |
+| Recently released | Something came out in the last 7 days (today included) | Sorted by each title's latest release, newest first. Covers episodes, season premieres, digital and Blu-ray releases, and titles newly added to a PH platform. Platforms a title was already on when it was first tracked are not counted as new |
+| Coming this week | Something is due in the next 7 days (after today) | Grouped under date lines, in date order, titles A–Z within a date. Covers the next episode of each tracked show and upcoming digital, Blu-ray or PH cinema dates for movies |
+| (fallback) | Both sections above are empty | `No releases in the last 7 days or the next 7.` |
 | Trending Globally / Trending in PH | The list has a snapshot | Latest snapshot, top 10. `{year}` is the year of release (movies) or first air date (shows), in italics. ` (TV)` is added for shows only |
 
-### Event detail lines (`{event_detail}`)
+All dates use the format `DD MMM YYYY`, for example `11 Nov 2026`.
 
-| Event | Text | Date shown |
-|---|---|---|
-| Digital | `Digital release (first in {country})` | Yes |
-| Physical | `Blu-ray/DVD release (first in {country})` | Yes |
-| Streaming | `Available in PH on {provider}` | No |
-| Season | `Season {n} premiered` | Yes |
-| Episode | `S{ss}E{ee} "{episode name}"` | Yes |
-
-All dates (`{date}`, `{event_date}`) use the format `DD MMM YYYY`, for example `11 Nov 2026`.
-
-`{country}` is a two-letter code such as `US`. Season and episode numbers are zero-padded (`S02E05`).
+In the Coming this week date lines, the year is left out of `{date}` (`Fri 13 Nov`) when every entry is in the same year. Season and episode numbers are zero-padded (`S02E05`).
 
 ## Test message
 
