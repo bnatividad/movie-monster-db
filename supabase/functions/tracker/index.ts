@@ -1,7 +1,7 @@
 // Release tracker edge function.
 // Actions (POST body {"action": ...} or ?action=...):
 //   refresh  - pull trending lists (global + PH), check releases for tracked titles
-//   summary  - send the weekly summary of new releases to Discord and/or Telegram
+//   summary  - send the weekly summary (recently released, coming this week, both charts) to Discord and/or Telegram
 //   preview  - build the summary and return it; sends nothing, marks nothing sent
 //   preview_send - same, but also posts it (labelled as a preview) to DISCORD_TEST_WEBHOOK_URL if set,
 //                  otherwise to the normal alert channels; marks nothing sent
@@ -401,34 +401,27 @@ async function buildSummary() {
     .select("id, kind, event_key, event_date, detail, titles(title, media_type)")
     .is("notified_at", null).order("event_date", { ascending: false });
 
-  const lines: string[] = [`**🎬 Weekly Release Summary — ${fmtDate(today())}**`, ""];
+  const lines: string[] = [`**🎬 Weekly Release Summary — ${fmtDate(today())}**`];
   const evs = events ?? [];
-  if (evs.length) {
-    lines.push(`**New releases (${evs.length})**`);
-    const byTitle = new Map<string, string[]>();
-    for (const e of evs as any[]) {
-      const k = `${e.titles.title} (${e.titles.media_type === "tv" ? "TV" : "Movie"})`;
-      if (!byTitle.has(k)) byTitle.set(k, []);
-      byTitle.get(k)!.push(`${e.detail}${e.event_date && e.kind !== "streaming" ? ` · ${fmtDate(e.event_date)}` : ""}`);
-    }
-    for (const [t, ds] of byTitle) {
-      lines.push(`- **${clean(t)}**`);
-      const shown = ds.slice(0, 6);
-      for (const d of shown) lines.push(`  - ${clean(d)}`);
-      if (ds.length > shown.length) lines.push(`  - …and ${ds.length - shown.length} more`);
-    }
-  } else {
-    lines.push("No new releases since the last summary.");
-  }
+
+  // Released in the last 7 days (today included). Streaming events recorded silently on a title's
+  // first check (notified within a minute of detection) are left out: they mean "was already there".
+  const weekAgo = new Date(Date.now() - 6 * 864e5).toISOString().slice(0, 10);
+  const { data: recentEvs } = await db.from("release_events")
+    .select("kind, event_key, event_date, detected_at, notified_at, titles(tmdb_id, title, media_type)")
+    .gte("event_date", weekAgo).lte("event_date", today());
+  const recentRows = (recentEvs ?? []).filter((e: any) => !(e.kind === "streaming" && e.notified_at &&
+    new Date(e.notified_at).getTime() - new Date(e.detected_at).getTime() < 60_000));
 
   // Coming up in the next 7 days
   const week = new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10);
   const { data: tracked } = await db.from("titles").select("tmdb_id, title, media_type, digital_release, physical_release, next_episode").eq("tracked", true);
   const lists = await Promise.all(["global", "ph"].map(latestList)) as any[][];
 
-  // Where to watch: one live TMDB lookup per title shown (tracked + both charts), deduped
+  // Where to watch: one live TMDB lookup per title shown (recent + tracked + both charts), deduped
   const where = new Map<string, Where>();
   const keys = new Map<string, [number, string]>();
+  for (const e of recentRows as any[]) keys.set(`${e.titles.media_type}:${e.titles.tmdb_id}`, [e.titles.tmdb_id, e.titles.media_type]);
   for (const t of tracked ?? []) keys.set(`${t.media_type}:${t.tmdb_id}`, [t.tmdb_id, t.media_type]);
   for (const r of lists.flat()) keys.set(`${r.titles.media_type}:${r.titles.tmdb_id}`, [r.titles.tmdb_id, r.titles.media_type]);
   await Promise.all([...keys].map(async ([k, [id, type]]) => {
@@ -442,36 +435,73 @@ async function buildSummary() {
     if (s) lines.push(`-# ${clean(s)}`);
   };
 
-  // One entry per title per day: same-day releases are merged, e.g. "(digital, Blu-ray)"
-  const upcoming = new Map<string, { date: string; title: string; key: string; tags: string[] }>();
-  const addUpcoming = (date: string, t: any, tag: string) => {
+  // Coming this week: one entry per title per day; same-day releases are merged, e.g. "(digital, Blu-ray)"
+  type Entry = { date: string; title: string; key: string; tags: string[] };
+  const adder = (m: Map<string, Entry>) => (date: string, t: any, tag: string) => {
     const key = `${t.media_type}:${t.tmdb_id}`;
-    const u = upcoming.get(`${date}|${key}`) ?? { date, title: t.title, key, tags: [] };
-    u.tags.push(tag);
-    upcoming.set(`${date}|${key}`, u);
+    const u = m.get(`${date}|${key}`) ?? { date, title: t.title, key, tags: [] };
+    if (!u.tags.includes(tag)) u.tags.push(tag);
+    m.set(`${date}|${key}`, u);
   };
+  // Entries as "- **{title}** _{tag}_" plus the where-to-watch subtitle.
+  // Episodes come first, consecutive ones collapsed (S03E01–E04); other releases go in brackets.
+  // byDate=true puts a "**Fri 13 Nov**" line above each date's entries.
+  const pushEntries = (heading: string, entries: Entry[], byDate: boolean) => {
+    if (!entries.length) return;
+    lines.push("", `**${heading}**`);
+    // Drop the year when every entry falls in the same year
+    const showYear = new Set(entries.map((u) => u.date.slice(0, 4))).size > 1;
+    let lastDate = "";
+    for (const u of entries) {
+      if (byDate && u.date !== lastDate) {
+        const wd = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][new Date(u.date + "T00:00:00Z").getUTCDay()];
+        lines.push(`**${wd} ${fmtDate(u.date, showYear)}**`);
+        lastDate = u.date;
+      }
+      const eps = u.tags.filter((x) => /^S\d+E\d+$/.test(x)).sort();
+      // A season premiere is implied by its episodes, so it's only shown on its own
+      const other = u.tags.filter((x) => !/^S\d+E\d+$/.test(x) && !(/^Season \d+$/.test(x) && eps.length));
+      const tag = [epRanges(eps), other.length ? `(${other.join(", ")})` : ""].filter(Boolean).join(" ");
+      lines.push(`- **${clean(u.title)}** _${tag}_`);
+      pushWhere(u.key);
+    }
+  };
+
+  // Recently released: one entry per title for the whole week (no dates), so daily shows
+  // collapse into one range (S25E32–E35). Entry date = its latest release, for sorting.
+  const recent = new Map<string, Entry>();
+  const addRecent = (date: string, t: any, tag: string) => {
+    const key = `${t.media_type}:${t.tmdb_id}`;
+    const u = recent.get(key) ?? { date, title: t.title, key, tags: [] };
+    if (!u.tags.includes(tag)) u.tags.push(tag);
+    if (date > u.date) u.date = date;
+    recent.set(key, u);
+  };
+  const kindTag: Record<string, (e: any) => string> = {
+    episode: (e) => e.event_key,
+    season: (e) => `Season ${Number(e.event_key.slice(1))}`,
+    digital: () => "digital",
+    physical: () => "Blu-ray",
+    streaming: (e) => `new on ${e.event_key.slice("streaming:".length)}`,
+  };
+  for (const e of recentRows as any[]) if (kindTag[e.kind]) addRecent(e.event_date, e.titles, kindTag[e.kind](e));
+  // Newest first
+  pushEntries("Recently released", [...recent.values()].sort((a, b) => b.date.localeCompare(a.date) || a.title.localeCompare(b.title)), false);
+
+  const upcoming = new Map<string, Entry>();
+  const addUpcoming = adder(upcoming);
   for (const t of tracked ?? []) {
     const ne = t.next_episode as any;
     const cinema = where.get(`${t.media_type}:${t.tmdb_id}`)?.phCinema;
-    if (ne?.air_date && ne.air_date <= week) addUpcoming(ne.air_date, t, `S${pad(ne.season)}E${pad(ne.episode)}`);
+    // Strictly after today: anything out today is already under "Recently released"
+    if (ne?.air_date && ne.air_date > today() && ne.air_date <= week) addUpcoming(ne.air_date, t, `S${pad(ne.season)}E${pad(ne.episode)}`);
     if (t.digital_release && t.digital_release > today() && t.digital_release <= week) addUpcoming(t.digital_release, t, "digital");
     if (t.physical_release && t.physical_release > today() && t.physical_release <= week) addUpcoming(t.physical_release, t, "Blu-ray");
     if (cinema && cinema > today() && cinema <= week) addUpcoming(cinema, t, "PH cinemas");
   }
-  if (upcoming.size) {
-    lines.push("", "**Coming this week**");
-    // ISO dates kept until display so sorting stays chronological
-    const entries = [...upcoming.values()].sort((a, b) => a.date.localeCompare(b.date) || a.title.localeCompare(b.title));
-    // Drop the year when every entry falls in the same year
-    const showYear = new Set(entries.map((u) => u.date.slice(0, 4))).size > 1;
-    for (const u of entries) {
-      const eps = u.tags.filter((x) => /^S\d+E\d+$/.test(x));
-      const other = u.tags.filter((x) => !eps.includes(x));
-      const tag = [...eps, other.length ? `(${other.join(", ")})` : ""].filter(Boolean).join(" ");
-      lines.push(`- ${fmtDate(u.date, showYear)} · **${clean(u.title)}** _${tag}_`);
-      pushWhere(u.key);
-    }
-  }
+  // ISO dates kept until display so sorting stays chronological
+  pushEntries("Coming this week", [...upcoming.values()].sort((a, b) => a.date.localeCompare(b.date) || a.title.localeCompare(b.title)), true);
+  if (!recent.size && !upcoming.size) lines.push("", "No releases in the last 7 days or the next 7.");
 
   for (const [i, label] of ["🌍 Trending Globally", "🇵🇭 Trending in PH"].entries()) {
     const rows = lists[i];
@@ -502,6 +532,21 @@ async function preview(send = false) {
   if (!send) return { new_events: evs.length, markdown: lines.join("\n") };
   const out = ["-# Layout preview, not the weekly summary. No releases were marked as sent.", ...lines];
   return { ...(await broadcast(toHtml(out), out.join("\n"), true)), new_events: evs.length };
+}
+
+// ["S03E01","S03E02","S03E03","S03E05"] -> "S03E01–E03, S03E05" (input sorted)
+function epRanges(eps: string[]) {
+  const out: string[] = [];
+  let start = "", prev = "";
+  const num = (s: string) => [Number(s.slice(1, s.indexOf("E"))), Number(s.slice(s.indexOf("E") + 1))];
+  const close = () => { if (start) out.push(start === prev ? start : `${start}–${prev.slice(prev.indexOf("E"))}`); };
+  for (const e of eps) {
+    const [s, n] = num(e);
+    if (prev && num(prev)[0] === s && num(prev)[1] === n - 1) { prev = e; continue; }
+    close(); start = prev = e;
+  }
+  close();
+  return out.join(", ");
 }
 
 // Strip markup characters from titles so they can't break bold/italics on either platform
